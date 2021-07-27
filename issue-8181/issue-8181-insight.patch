@@ -1,0 +1,76 @@
+diff --git a/client/v3/concurrency/session.go b/client/v3/concurrency/session.go
+index 7143cc474..8a4ca0855 100644
+--- a/client/v3/concurrency/session.go
++++ b/client/v3/concurrency/session.go
+@@ -19,6 +19,7 @@ import (
+ 	"time"
+ 
+ 	v3 "go.etcd.io/etcd/client/v3"
++	"go.uber.org/zap"
+ )
+ 
+ const defaultSessionTTL = 60
+@@ -63,8 +64,13 @@ func NewSession(client *v3.Client, opts ...SessionOption) (*Session, error) {
+ 	// keep the lease alive until client error or cancelled context
+ 	go func() {
+ 		defer close(donec)
++		dontAlive := true
+ 		for range keepAlive {
+ 			// eat messages until keep alive channel closes
++			dontAlive = false
++		}
++		if dontAlive {
++			client.GetLogger().Info("do not alive KeepAlive for lease", zap.Int64("id", int64(id)))
+ 		}
+ 	}()
+ 
+diff --git a/client/v3/lease.go b/client/v3/lease.go
+index fcab61aab..ac7c5b443 100644
+--- a/client/v3/lease.go
++++ b/client/v3/lease.go
+@@ -512,6 +512,7 @@ func (l *lessor) recvKeepAlive(resp *pb.LeaseKeepAliveResponse) {
+ 	if karesp.TTL <= 0 {
+ 		// lease expired; close all keep alive channels
+ 		delete(l.keepAlives, karesp.ID)
++		l.lg.Info("lease with TTL=0", zap.Int64("TTL", resp.TTL), zap.String("lease-keepalive-response", resp.String()))
+ 		ka.close()
+ 		return
+ 	}
+diff --git a/server/etcdserver/v3_server.go b/server/etcdserver/v3_server.go
+index c0bb5ac7e..04c718492 100644
+--- a/server/etcdserver/v3_server.go
++++ b/server/etcdserver/v3_server.go
+@@ -279,14 +279,19 @@ func (s *EtcdServer) LeaseRevoke(ctx context.Context, r *pb.LeaseRevokeRequest)
+ 	return resp.(*pb.LeaseRevokeResponse), nil
+ }
+ 
+-func (s *EtcdServer) LeaseRenew(ctx context.Context, id lease.LeaseID) (int64, error) {
+-	ttl, err := s.lessor.Renew(id)
++func (s *EtcdServer) LeaseRenew(ctx context.Context, id lease.LeaseID) (ttl int64, err error) {
++	leader := true
++	defer func() {
++		s.lg.Info("lease renew result", zap.Bool("leader", leader), zap.Int64("id", int64(id)), zap.Int64("ttl", ttl), zap.Error(err))
++	}()
++	ttl, err = s.lessor.Renew(id)
+ 	if err == nil { // already requested to primary lessor(leader)
+ 		return ttl, nil
+ 	}
+ 	if err != lease.ErrNotPrimary {
+ 		return -1, err
+ 	}
++	leader = false
+ 
+ 	cctx, cancel := context.WithTimeout(ctx, s.Cfg.ReqTimeout())
+ 	defer cancel()
+diff --git a/server/lease/lessor.go b/server/lease/lessor.go
+index 715b82079..1401f366d 100644
+--- a/server/lease/lessor.go
++++ b/server/lease/lessor.go
+@@ -289,6 +289,7 @@ func (le *lessor) Grant(id LeaseID, ttl int64) (*Lease, error) {
+ 		l.forever()
+ 	}
+ 
++	le.lg.Sugar().Infof("Add lease: %v", l)
+ 	le.leaseMap[id] = l
+ 	l.persistTo(le.b)
+ 
