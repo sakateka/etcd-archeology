@@ -1,6 +1,7 @@
 ## How to run
 ```
 cd github.com/etcd-io/etcd
+git checkout v3.5.0
 git clone https://github.com/sakateka/etcd-archeology
 git apply etcd-archeology/issue-8181/issue-8181-insight.patch
 cd etcd-archeology/issue-8181/
